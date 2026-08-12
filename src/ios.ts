@@ -8,6 +8,54 @@ import { validatePackageName, validateLocale } from "./utils";
 const WDA_PORT = 8100;
 const IOS_TUNNEL_PORT = 60105;
 
+// farm fork (#1590): go-ios calls are BOUNDED. Upstream 0.0.60 ran every
+// `execFileSync(ios, …)` with no timeout, so a wedged usbmux/RSD path hung the
+// server forever. 20s is generous for `ios list`/`info`/`apps` over a healthy tunnel.
+const GO_IOS_TIMEOUT_MS = (() => {
+	const raw = Number.parseInt(process.env.MOBILEMCP_GOIOS_TIMEOUT_MS ?? "", 10);
+	return Number.isFinite(raw) && raw >= 1_000 && raw <= 120_000 ? raw : 20_000;
+})();
+
+// farm fork (#1590): the WDA endpoint is PER-DEVICE + env-configurable, not the fixed
+// `localhost:8100`. Upstream pinned every device to 8100, so on a rack where each
+// iPhone's WebDriverAgent is forwarded to its OWN local port, two phones cross-wired
+// (a tap for device B hit whatever phone owned 8100). A host that runs a per-device
+// WDA forward exports `MOBILEMCP_WDA_PORTS="<udid>=<port>,…"`; `MOBILEMCP_WDA_PORT`
+// is a single override; default stays 8100 for the classic single-device setup.
+export interface WdaEndpoint { host: string; port: number }
+
+const parseWdaPortsMap = (raw: string | undefined): Map<string, number> => {
+	const map = new Map<string, number>();
+	if (!raw) {
+		return map;
+	}
+	for (const pair of raw.split(",")) {
+		const idx = pair.lastIndexOf("=");
+		if (idx <= 0) {
+			continue;
+		}
+		const udid = pair.slice(0, idx).trim();
+		const port = Number.parseInt(pair.slice(idx + 1).trim(), 10);
+		if (udid && Number.isInteger(port) && port > 0 && port < 65536) {
+			map.set(udid, port);
+		}
+	}
+	return map;
+};
+
+export const resolveWdaEndpoint = (deviceId: string): WdaEndpoint => {
+	const host = (process.env.MOBILEMCP_WDA_HOST ?? "localhost").trim() || "localhost";
+	const perDevice = parseWdaPortsMap(process.env.MOBILEMCP_WDA_PORTS).get(deviceId);
+	if (perDevice) {
+		return { host, port: perDevice };
+	}
+	const single = Number.parseInt(process.env.MOBILEMCP_WDA_PORT ?? "", 10);
+	if (Number.isInteger(single) && single > 0 && single < 65536) {
+		return { host, port: single };
+	}
+	return { host, port: WDA_PORT };
+};
+
 interface ListCommandOutput {
 	deviceList: string[];
 }
@@ -42,20 +90,27 @@ const getGoIosPath = (): string => {
 
 export class IosRobot implements Robot {
 
+	// farm fork (#1590): resolve this device's OWN WDA endpoint once, and cache the
+	// WebDriverAgent so its session (see webdriver-agent.ts) survives across actions.
+	private readonly endpoint: WdaEndpoint;
+	private wdaInstance: WebDriverAgent | null = null;
+
 	public constructor(private deviceId: string) {
+		this.endpoint = resolveWdaEndpoint(deviceId);
 	}
 
 	private isListeningOnPort(port: number): Promise<boolean> {
-		return new Promise((resolve, reject) => {
+		return new Promise(resolve => {
 			const client = new Socket();
-			client.connect(port, "localhost", () => {
+			const done = (ok: boolean) => {
 				client.destroy();
-				resolve(true);
-			});
-
-			client.on("error", (err: any) => {
-				resolve(false);
-			});
+				resolve(ok);
+			};
+			// farm fork (#1590): a bounded connect probe — never hang on a wedged host.
+			client.setTimeout(3_000);
+			client.once("timeout", () => done(false));
+			client.connect(port, this.endpoint.host, () => done(true));
+			client.on("error", () => done(false));
 		});
 	}
 
@@ -64,7 +119,7 @@ export class IosRobot implements Robot {
 	}
 
 	private async isWdaForwardRunning(): Promise<boolean> {
-		return await this.isListeningOnPort(WDA_PORT);
+		return await this.isListeningOnPort(this.endpoint.port);
 	}
 
 	private async assertTunnelRunning(): Promise<void> {
@@ -83,7 +138,11 @@ export class IosRobot implements Robot {
 			throw new ActionableError("Port forwarding to WebDriverAgent is not running (tunnel okay), please see https://github.com/mobile-next/mobile-mcp/wiki/");
 		}
 
-		const wda = new WebDriverAgent("localhost", WDA_PORT);
+		// farm fork (#1590): cache the WDA instance (its session persists across actions).
+		if (!this.wdaInstance) {
+			this.wdaInstance = new WebDriverAgent(this.endpoint.host, this.endpoint.port);
+		}
+		const wda = this.wdaInstance;
 
 		if (!(await wda.isRunning())) {
 			throw new ActionableError("WebDriverAgent is not running on device (tunnel okay, port forwarding okay), please see https://github.com/mobile-next/mobile-mcp/wiki/");
@@ -93,7 +152,8 @@ export class IosRobot implements Robot {
 	}
 
 	private async ios(...args: string[]): Promise<string> {
-		return execFileSync(getGoIosPath(), ["--udid", this.deviceId, ...args], {}).toString();
+		// farm fork (#1590): bounded so a wedged go-ios/usbmux can't hang forever.
+		return execFileSync(getGoIosPath(), ["--udid", this.deviceId, ...args], { timeout: GO_IOS_TIMEOUT_MS }).toString();
 	}
 
 	public async getIosVersion(): Promise<string> {
@@ -246,7 +306,7 @@ export class IosManager {
 
 	public isGoIosInstalled(): boolean {
 		try {
-			const output = execFileSync(getGoIosPath(), ["version"], { stdio: ["pipe", "pipe", "ignore"] }).toString();
+			const output = execFileSync(getGoIosPath(), ["version"], { stdio: ["pipe", "pipe", "ignore"], timeout: GO_IOS_TIMEOUT_MS }).toString();
 			const json: VersionCommandOutput = JSON.parse(output);
 			return json.version !== undefined && (json.version.startsWith("v") || json.version === "local-build");
 		} catch (error) {
@@ -255,13 +315,13 @@ export class IosManager {
 	}
 
 	public getDeviceName(deviceId: string): string {
-		const output = execFileSync(getGoIosPath(), ["info", "--udid", deviceId]).toString();
+		const output = execFileSync(getGoIosPath(), ["info", "--udid", deviceId], { timeout: GO_IOS_TIMEOUT_MS }).toString();
 		const json: InfoCommandOutput = JSON.parse(output);
 		return json.DeviceName;
 	}
 
 	public getDeviceInfo(deviceId: string): InfoCommandOutput {
-		const output = execFileSync(getGoIosPath(), ["info", "--udid", deviceId]).toString();
+		const output = execFileSync(getGoIosPath(), ["info", "--udid", deviceId], { timeout: GO_IOS_TIMEOUT_MS }).toString();
 		const json: InfoCommandOutput = JSON.parse(output);
 		return json;
 	}
@@ -272,7 +332,7 @@ export class IosManager {
 			return [];
 		}
 
-		const output = execFileSync(getGoIosPath(), ["list"]).toString();
+		const output = execFileSync(getGoIosPath(), ["list"], { timeout: GO_IOS_TIMEOUT_MS }).toString();
 		const json: ListCommandOutput = JSON.parse(output);
 		const devices = json.deviceList.map(device => ({
 			deviceId: device,
@@ -288,7 +348,7 @@ export class IosManager {
 			return [];
 		}
 
-		const output = execFileSync(getGoIosPath(), ["list"]).toString();
+		const output = execFileSync(getGoIosPath(), ["list"], { timeout: GO_IOS_TIMEOUT_MS }).toString();
 		const json: ListCommandOutput = JSON.parse(output);
 		const devices = json.deviceList.map(device => {
 			const info = this.getDeviceInfo(device);

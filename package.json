@@ -1,8 +1,8 @@
 {
   "name": "@mobilenext/mobile-mcp",
   "mcpName": "io.github.mobile-next/mobile-mcp",
-  "version": "0.0.1",
-  "description": "Mobile MCP",
+  "version": "0.0.60-farm.1",
+  "description": "Mobile MCP \u2014 serebano/mobile-mcp farm fork (#1590): multi-client SSE, per-device WDA, bounded fetch/go-ios timeouts, widened element filter, go-ios iOS decoupled from mobilecli.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mobile-next/mobile-mcp.git"
@@ -18,7 +18,8 @@
     "test": "c8 playwright test",
     "watch": "tsc --watch",
     "clean": "rm -rf lib",
-    "prepare": "husky"
+    "prepare": "npm run build",
+    "test:farm": "playwright test test/farm.spec.ts --reporter=line"
   },
   "files": [
     "lib"

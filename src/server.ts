@@ -164,17 +164,23 @@ export const createMcpServer = (): McpServer => {
 
 	const getRobotFromDevice = (deviceId: string): Robot => {
 
-		// from now on, we must have mobilecli working
-		ensureMobilecliAvailable();
-
-		// Check if it's an iOS device
-		const iosManager = new IosManager();
-		const iosDevices = iosManager.listDevices();
-		const iosDevice = iosDevices.find(d => d.deviceId === deviceId);
-		if (iosDevice) {
-			posthog("get_robot", { "DevicePlatform": "ios", "DeviceType": "real" }).then();
-			return new IosRobot(deviceId);
+		// farm fork (#1590): a physical iOS device is driven by go-ios + WebDriverAgent,
+		// NOT mobilecli. Resolve it FIRST so a mobilecli/mobilewright load failure never
+		// breaks the iOS-farm leg (which only has go-ios). A go-ios failure here just
+		// falls through to the mobilecli-gated Android/simulator paths below.
+		try {
+			const iosManager = new IosManager();
+			const iosDevice = iosManager.listDevices().find(d => d.deviceId === deviceId);
+			if (iosDevice) {
+				posthog("get_robot", { "DevicePlatform": "ios", "DeviceType": "real" }).then();
+				return new IosRobot(deviceId);
+			}
+		} catch (error: any) {
+			trace(`go-ios iOS device lookup failed for ${deviceId}: ${error?.message ?? error}`);
 		}
+
+		// from now on (Android + simulators), we must have mobilecli working
+		ensureMobilecliAvailable();
 
 		// Check if it's an Android device
 		const androidManager = new AndroidDeviceManager();
@@ -221,9 +227,6 @@ export const createMcpServer = (): McpServer => {
 		{ readOnlyHint: true },
 		async ({}) => {
 
-			// from today onward, we must have mobilecli working
-			ensureMobilecliAvailable();
-
 			const iosManager = new IosManager();
 			const androidManager = new AndroidDeviceManager();
 			const devices: MobilecliDevice[] = [];
@@ -258,23 +261,29 @@ export const createMcpServer = (): McpServer => {
 				// If go-ios is not available, silently skip
 			}
 
-			// Get iOS simulators from mobilecli (excluding offline devices)
-			const response = mobilecli.getDevices({
-				platform: "ios",
-				type: "simulator",
-				includeOffline: false,
-			});
-			if (response.status === "ok" && response.data && response.data.devices) {
-				for (const device of response.data.devices) {
-					devices.push({
-						id: device.id,
-						name: device.name,
-						platform: device.platform,
-						type: device.type,
-						version: device.version,
-						state: "online",
-					});
+			// Get iOS simulators from mobilecli (excluding offline devices).
+			// farm fork (#1590): best-effort — a missing/broken mobilecli must NOT hide
+			// the physical go-ios iPhones + Android devices already collected above.
+			try {
+				const response = mobilecli.getDevices({
+					platform: "ios",
+					type: "simulator",
+					includeOffline: false,
+				});
+				if (response.status === "ok" && response.data && response.data.devices) {
+					for (const device of response.data.devices) {
+						devices.push({
+							id: device.id,
+							name: device.name,
+							platform: device.platform,
+							type: device.type,
+							version: device.version,
+							state: "online",
+						});
+					}
 				}
+			} catch (error: any) {
+				trace(`mobilecli simulator enumeration skipped: ${error?.message ?? error}`);
 			}
 
 			const out: MobilecliDevicesResponse = { devices };

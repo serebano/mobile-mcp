@@ -8,7 +8,6 @@ import { program } from "commander";
 
 const startSseServer = async (host: string, port: number) => {
 	const app = express();
-	const server = createMcpServer();
 
 	const authToken = process.env.MOBILEMCP_AUTH;
 	if (!authToken) {
@@ -41,24 +40,33 @@ const startSseServer = async (host: string, port: number) => {
 		next();
 	});
 
-	let transport: SSEServerTransport | null = null;
+	// farm fork (#1590): MULTI-CLIENT SSE. Upstream 0.0.60 kept ONE global transport
+	// and 409'd every second `GET /mcp` ("Another client is already connected"). That
+	// single decision forced the ~1300-LOC bmfarm mux (mobileMcpMux*). We now keep a
+	// Map<sessionId, {server, transport}> so N clients (the iOS-farm leg, BusyBro over
+	// ngrok, the dashboard Inspect) connect concurrently; each POST routes by its own
+	// `sessionId` query param the SDK's SSEServerTransport advertises on connect.
+	const sessions = new Map<string, { server: ReturnType<typeof createMcpServer>; transport: SSEServerTransport }>();
 
 	app.post("/mcp", (req, res) => {
-		if (transport) {
-			transport.handlePostMessage(req, res);
-		}
-	});
-
-	app.get("/mcp", (req, res) => {
-		if (transport) {
-			res.status(409).json({ error: "Another client is already connected. Disconnect the existing client first." });
+		const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : undefined;
+		const session = sessionId ? sessions.get(sessionId) : undefined;
+		if (!session) {
+			res.status(404).json({ error: "Unknown or expired sessionId. Reconnect with GET /mcp." });
 			return;
 		}
 
-		transport = new SSEServerTransport("/mcp", res);
+		session.transport.handlePostMessage(req, res);
+	});
+
+	app.get("/mcp", (req, res) => {
+		const server = createMcpServer();
+		const transport = new SSEServerTransport("/mcp", res);
+
+		sessions.set(transport.sessionId, { server, transport });
 
 		transport.onclose = () => {
-			transport = null;
+			sessions.delete(transport.sessionId);
 		};
 
 		server.connect(transport);
