@@ -1,5 +1,11 @@
 # Mobile Next - MCP server for Mobile Development and Automation | iOS, Android, Simulator, Emulator, and Real Devices
 
+> ### Busymate farm fork (`serebano/mobile-mcp`)
+>
+> This is the Busymate fork of [`mobile-next/mobile-mcp`](https://github.com/mobile-next/mobile-mcp), the mobile-mcp bridge consumed by the [busymate-devtools](https://github.com/serebano/busymate-devtools) Android/iOS farm daemon (`cli/bmfarm`). The daemon supervises it and installs the pinned prebuilt tarball `mobilenext-mobile-mcp-0.0.60-farm.1.tgz` from the release [`farm-v0.0.60.1`](https://github.com/serebano/mobile-mcp/releases/tag/farm-v0.0.60.1) — **not** `@mobilenext/mobile-mcp@latest`, which is now v1.0.x = `mobilecli`-mandatory (the server throws when the `mobilewright` binary is absent) and broken on a go-ios-only farm host.
+>
+> The fork is built off the last known-good go-ios/WDA base (upstream **v0.0.60**) with the farm patches below. The `main` branch tracks this shipped farm line; upstream lives at [`mobile-next/mobile-mcp`](https://github.com/mobile-next/mobile-mcp). See the [`farm-v0.0.60.1` CHANGELOG entry](CHANGELOG.md) for the full list of changes vs upstream. Run the deviceless fork proofs with `npm run test:farm`.
+
 This is a [Model Context Protocol (MCP) server](https://github.com/modelcontextprotocol) that enables scalable mobile automation, development through a platform-agnostic interface, eliminating the need for distinct iOS or Android knowledge. You can run it on emulators, simulators, and real devices (iOS and Android).
 This server allows Agents and LLMs to interact with native iOS/Android applications and devices through structured accessibility snapshots or coordinate-based taps based on screenshots.
 

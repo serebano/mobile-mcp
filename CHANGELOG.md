@@ -1,3 +1,20 @@
+<!--
+serebano/mobile-mcp is the Busymate farm fork. Entries below `farm-v0.0.60.1` are the
+inherited upstream (mobile-next) changelog for the v0.0.60 base the fork is built off.
+The fork deliberately stays on this v0.0.60 go-ios/WDA base (upstream has since moved to
+v1.0.x = mobilecli-mandatory, which is broken on a go-ios-only farm host). Fork-specific
+work references busymate-devtools (`bmfarm #NNNN`) issue numbers.
+-->
+
+## [farm-v0.0.60.1](https://github.com/serebano/mobile-mcp/releases/tag/farm-v0.0.60.1) (2026-08-12)
+Busymate farm fork — pin-target build off upstream v0.0.60, the exact ref bmfarm pins + consumes (bmfarm #1590). Version `0.0.60-farm.1`; `prepare: npm run build` so a git/tarball consumer builds `lib/`. What the fork changes vs upstream v0.0.60:
+
+* **`index.ts` — multi-client SSE.** `Map<sessionId>` transport instead of upstream's single-client server, retiring the 409 that forced bmfarm's ~1300-LOC multiplexer; N clients (the iOS-farm leg, BusyBro over ngrok, the dashboard Inspect) connect concurrently.
+* **`webdriver-agent.ts` — bounded + cached WDA.** Every WDA `fetch` is bounded by an `AbortSignal` (`MOBILEMCP_WDA_TIMEOUT_MS`, default 15s) so a never-responding WDA throws instead of the ~13s+ hang; ONE cached WDA session per device (create-once, 404-recreate) instead of create+delete per action (~557ms/action saved); quiescence-off (`appium/settings`) once per session; a widened element filter (`Cell`/`Other`/`Link`/`Tab`/`Slider`/`SegmentedControl`/…) gated by `isTappableRect` (reject zero-area/off-screen) + `hasIdentity` (require a real label/name/id/value) so the App-Store-Search-tab class resolves for `find_and_tap`.
+* **`ios.ts` — per-device WDA endpoint.** Env-configurable per-device WDA endpoint (`MOBILEMCP_WDA_PORTS` udid=port / `MOBILEMCP_WDA_PORT` / `MOBILEMCP_WDA_HOST`) kills the fixed `:8100` two-phone cross-wire; cached WDA instance; bounded go-ios `execFileSync` (`MOBILEMCP_GOIOS_TIMEOUT_MS`).
+* **`server.ts` — go-ios decoupled from mobilecli.** A physical iPhone resolves via go-ios FIRST, and device-listing keeps returning go-ios iPhones + Android even if `mobilewright` fails to load — so the fork runs on a go-ios-only farm host (upstream v1.0.x makes `mobilecli`/`mobilewright` mandatory).
+* **`test/farm.spec.ts` — deviceless fork proofs** (element widening, `isTappable`/`hasIdentity`, per-device endpoint, bounded-fetch-not-hang): `npm run test:farm`.
+
 ## [0.0.60](https://github.com/mobile-next/mobile-mcp/releases/tag/0.0.60) (2026-06-15)
 * Chore: Updated mobilewright SDK version ([#361](https://github.com/mobile-next/mobile-mcp/pull/361))
 
